@@ -21,6 +21,7 @@ from sklearn.metrics import (
 import os
 import pickle
 import time
+import io
 
 try:
     import psutil
@@ -65,17 +66,93 @@ FEATURE_NAMES = [
 
 
 @st.cache_data
-def load_data():
+def load_data(uploaded_train_bytes: bytes = None,
+              uploaded_test_bytes: bytes = None,
+              uploaded_combined_bytes: bytes = None):
+    """Load NSL-KDD data from local files or uploaded bytes.
+
+    Priority:
+    1) uploaded_combined_bytes (single CSV containing train+test)
+    2) uploaded_train_bytes + uploaded_test_bytes
+    3) local files under NSL-KDD/
+    """
     try:
-        train_df = pd.read_csv('NSL-KDD/NSL_KDD_Train.csv', names=FEATURE_NAMES)
-        test_df = pd.read_csv('NSL-KDD/NSL_KDD_Test.csv', names=FEATURE_NAMES)
-        df = pd.concat([train_df, test_df], ignore_index=True)
+        if uploaded_combined_bytes is not None:
+            buf = io.BytesIO(uploaded_combined_bytes)
+            df = pd.read_csv(buf, names=FEATURE_NAMES)
+        elif uploaded_train_bytes is not None and uploaded_test_bytes is not None:
+            train_df = pd.read_csv(io.BytesIO(uploaded_train_bytes), names=FEATURE_NAMES)
+            test_df = pd.read_csv(io.BytesIO(uploaded_test_bytes), names=FEATURE_NAMES)
+            df = pd.concat([train_df, test_df], ignore_index=True)
+        else:
+            train_df = pd.read_csv('NSL-KDD/NSL_KDD_Train.csv', names=FEATURE_NAMES)
+            test_df = pd.read_csv('NSL-KDD/NSL_KDD_Test.csv', names=FEATURE_NAMES)
+            df = pd.concat([train_df, test_df], ignore_index=True)
+
         df = df.dropna()
         df['is_attack'] = df['attack_type'].apply(lambda x: 0 if x == 'normal' else 1)
         return df
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        # Defer detailed error to caller UI; just return None for control flow
         return None
+
+
+def generate_synthetic_nsl_kdd(n_rows: int = 5000) -> pd.DataFrame:
+    """Generate a small synthetic dataset with NSL-KDD-like columns.
+    This enables the app to run when the real dataset isn't available.
+    """
+    rng = np.random.default_rng(42)
+    protocols = ['tcp', 'udp', 'icmp']
+    services = ['http', 'smtp', 'ftp', 'domain_u', 'auth', 'telnet', 'finger', 'pop_3']
+    flags = ['SF', 'S0', 'REJ', 'RSTR', 'SH', 'RSTO']
+
+    df = pd.DataFrame({
+        'duration': rng.integers(0, 1000, size=n_rows),
+        'protocol_type': rng.choice(protocols, size=n_rows),
+        'service': rng.choice(services, size=n_rows),
+        'flag': rng.choice(flags, size=n_rows),
+        'src_bytes': rng.integers(0, 100000, size=n_rows),
+        'dst_bytes': rng.integers(0, 100000, size=n_rows),
+        'land': rng.integers(0, 2, size=n_rows),
+        'wrong_fragment': rng.integers(0, 3, size=n_rows),
+        'urgent': rng.integers(0, 3, size=n_rows),
+        'hot': rng.integers(0, 5, size=n_rows),
+        'num_failed_logins': rng.integers(0, 5, size=n_rows),
+        'logged_in': rng.integers(0, 2, size=n_rows),
+        'num_compromised': rng.integers(0, 5, size=n_rows),
+        'root_shell': rng.integers(0, 2, size=n_rows),
+        'su_attempted': rng.integers(0, 2, size=n_rows),
+        'num_root': rng.integers(0, 10, size=n_rows),
+        'num_file_creations': rng.integers(0, 5, size=n_rows),
+        'num_shells': rng.integers(0, 3, size=n_rows),
+        'num_access_files': rng.integers(0, 5, size=n_rows),
+        'num_outbound_cmds': 0,
+        'is_host_login': rng.integers(0, 2, size=n_rows),
+        'is_guest_login': rng.integers(0, 2, size=n_rows),
+        'count': rng.integers(0, 100, size=n_rows),
+        'srv_count': rng.integers(0, 100, size=n_rows),
+        'serror_rate': rng.random(size=n_rows),
+        'srv_serror_rate': rng.random(size=n_rows),
+        'rerror_rate': rng.random(size=n_rows),
+        'srv_rerror_rate': rng.random(size=n_rows),
+        'same_srv_rate': rng.random(size=n_rows),
+        'diff_srv_rate': rng.random(size=n_rows),
+        'srv_diff_host_rate': rng.random(size=n_rows),
+        'dst_host_count': rng.integers(0, 255, size=n_rows),
+        'dst_host_srv_count': rng.integers(0, 255, size=n_rows),
+        'dst_host_same_srv_rate': rng.random(size=n_rows),
+        'dst_host_diff_srv_rate': rng.random(size=n_rows),
+        'dst_host_same_src_port_rate': rng.random(size=n_rows),
+        'dst_host_srv_diff_host_rate': rng.random(size=n_rows),
+        'dst_host_serror_rate': rng.random(size=n_rows),
+        'dst_host_srv_serror_rate': rng.random(size=n_rows),
+        'dst_host_rerror_rate': rng.random(size=n_rows),
+        'dst_host_srv_rerror_rate': rng.random(size=n_rows),
+    })
+    # Create attack labels
+    df['attack_type'] = rng.choice(['normal', 'neptune', 'smurf', 'satan', 'ipsweep'], size=n_rows,
+                                   p=[0.8, 0.08, 0.06, 0.03, 0.03])
+    return df
 
 
 @st.cache_data
@@ -570,12 +647,36 @@ def main():
         ["Data Overview", "Model Training", "Real-time Detection", "Performance Analysis"],
     )
 
+    # Try to load local dataset first
     with st.spinner("Loading NSL-KDD dataset..."):
         df = load_data()
 
+    # If not found, provide upload UI and sample fallback
     if df is None:
-        st.error("Failed to load dataset. Please check if the NSL-KDD files are in the correct location.")
-        return
+        st.warning("Dataset not found. Upload CSV files or use a small sample to proceed.")
+        up_col1, up_col2 = st.columns(2)
+        with up_col1:
+            uploaded_train = st.file_uploader("Upload Train CSV (e.g., NSL_KDD_Train.csv)", type=['csv'], key='train_csv')
+            uploaded_test = st.file_uploader("Upload Test CSV (e.g., NSL_KDD_Test.csv)", type=['csv'], key='test_csv')
+        with up_col2:
+            uploaded_combined = st.file_uploader("Or upload a single combined CSV", type=['csv'], key='combined_csv')
+
+        df = None
+        if uploaded_combined is not None:
+            with st.spinner("Loading uploaded combined CSV..."):
+                df = load_data(uploaded_combined_bytes=uploaded_combined.getvalue())
+        elif uploaded_train is not None and uploaded_test is not None:
+            with st.spinner("Loading uploaded train/test CSVs..."):
+                df = load_data(uploaded_train_bytes=uploaded_train.getvalue(),
+                               uploaded_test_bytes=uploaded_test.getvalue())
+
+        if df is None:
+            if st.button("Use Sample Dataset (synthetic, 5k rows)"):
+                with st.spinner("Generating sample dataset..."):
+                    df = generate_synthetic_nsl_kdd(5000)
+                    df['is_attack'] = df['attack_type'].apply(lambda x: 0 if x == 'normal' else 1)
+            else:
+                st.stop()
 
     if page == "Data Overview":
         page_overview(df)
@@ -589,4 +690,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -57,6 +57,12 @@ A resource-efficient web application for network intrusion detection using the N
 3. Select a trained model
 4. Click "Analyze Traffic" and review the prediction and confidence
 
+### Dataset on Streamlit Cloud
+- The app first looks for local files `NSL-KDD/NSL_KDD_Train.csv` and `NSL-KDD/NSL_KDD_Test.csv`.
+- If not found (typical on Streamlit Cloud), the app shows uploaders:
+  - Upload Train and Test CSVs, or a single combined CSV.
+  - Or click "Use Sample Dataset" to generate a small synthetic dataset for demo purposes.
+
 ## Evaluation Metrics and Plots
 
 Per model, the app reports:
@@ -90,4 +96,3 @@ Notes:
 
 ## Support
 - If you have issues, check dataset paths, install requirements, and review terminal logs. Then open an issue with details.
-
