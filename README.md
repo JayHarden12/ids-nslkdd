@@ -58,10 +58,13 @@ A resource-efficient web application for network intrusion detection using the N
 4. Click "Analyze Traffic" and review the prediction and confidence
 
 ### Dataset on Streamlit Cloud
-- The app first looks for local files `NSL-KDD/NSL_KDD_Train.csv` and `NSL-KDD/NSL_KDD_Test.csv`.
-- If not found (typical on Streamlit Cloud), the app shows uploaders:
-  - Upload Train and Test CSVs, or a single combined CSV.
-  - Or click "Use Sample Dataset" to generate a small synthetic dataset for demo purposes.
+- Preferred: Commit the real dataset files to the repo so they are available at runtime (no uploads needed).
+- Accepted filenames and locations (case-sensitive on Linux):
+  - `NSL-KDD/NSL_KDD_Train.csv` and `NSL-KDD/NSL_KDD_Test.csv`, or
+  - `NSL-KDD/KDDTrain+.txt` and `NSL-KDD/KDDTest+.txt`
+- The app auto-discovers these names (.csv or .txt). If files are elsewhere, place them under `NSL-KDD/`.
+- Do not use Git LFS for these files on Streamlit Cloud — LFS pointers may be cloned without the actual data. Commit the actual CSV/TXT content, or add a download step.
+- If the app still cannot find the data, you can optionally upload Train/Test or a combined CSV from the UI to proceed.
 
 ## Evaluation Metrics and Plots
 

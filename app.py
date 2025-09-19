@@ -22,6 +22,8 @@ import os
 import pickle
 import time
 import io
+import re
+from pathlib import Path
 
 try:
     import psutil
@@ -65,35 +67,105 @@ FEATURE_NAMES = [
 ]
 
 
+def _is_git_lfs_pointer(file_path: Path) -> bool:
+    try:
+        if not file_path.exists() or file_path.stat().st_size > 1024:
+            return False
+        text = file_path.read_text(errors='ignore')
+        return 'git-lfs' in text and 'version https://git-lfs.github.com/spec/v1' in text
+    except Exception:
+        return False
+
+
+def _discover_nsl_kdd_files(base_dir: Path) -> tuple[Path | None, Path | None]:
+    """Attempt to find NSL-KDD train/test files with common names.
+    Returns (train_path, test_path) or (None, None) if not found.
+    """
+    candidates_train = re.compile(r"^(NSL[_-]KDD[_-]?Train|KDDTrain\+).*\.(csv|txt)$", re.I)
+    candidates_test = re.compile(r"^(NSL[_-]KDD[_-]?Test|KDDTest\+).*\.(csv|txt)$", re.I)
+
+    train_path = None
+    test_path = None
+
+    search_roots = [base_dir / 'NSL-KDD', base_dir]
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for p in root.rglob('*'):
+            if not p.is_file():
+                continue
+            name = p.name
+            if train_path is None and candidates_train.match(name):
+                train_path = p
+            elif test_path is None and candidates_test.match(name):
+                test_path = p
+            if train_path is not None and test_path is not None:
+                return train_path, test_path
+    return train_path, test_path
+
+
+def _read_nsl_kdd_dataframe(obj) -> pd.DataFrame:
+    """Read NSL-KDD CSV/TXT from a path or file-like and normalize columns.
+    - Handles presence/absence of header.
+    - Drops any extra columns like 'difficulty' if present.
+    """
+    # Try reading with automatic delimiter detection
+    df = pd.read_csv(obj, header=None)
+    # If first row looks like header, re-read with header=0
+    first_cell = str(df.iloc[0, 0]) if not df.empty else ''
+    if first_cell.lower() == 'duration':
+        df = pd.read_csv(obj, header=0)
+    # Normalize to first 42 columns (41 features + attack_type)
+    if df.shape[1] < 42:
+        # Retry with engine='python' and sep=',' in case of parsing issues
+        df = pd.read_csv(obj, header=None, engine='python', sep=',')
+        first_cell = str(df.iloc[0, 0]) if not df.empty else ''
+        if first_cell.lower() == 'duration':
+            df = pd.read_csv(obj, header=0, engine='python', sep=',')
+    # After retry, enforce at least 42 columns
+    if df.shape[1] < 42:
+        raise ValueError(f"Expected >=42 columns, found {df.shape[1]}")
+    df = df.iloc[:, :42]
+    df.columns = FEATURE_NAMES
+    return df
+
+
 @st.cache_data
 def load_data(uploaded_train_bytes: bytes = None,
               uploaded_test_bytes: bytes = None,
               uploaded_combined_bytes: bytes = None):
-    """Load NSL-KDD data from local files or uploaded bytes.
+    """Load NSL-KDD data from local repo or uploaded bytes.
 
     Priority:
     1) uploaded_combined_bytes (single CSV containing train+test)
     2) uploaded_train_bytes + uploaded_test_bytes
-    3) local files under NSL-KDD/
+    3) Discover local files under repo (e.g., NSL-KDD/KDDTrain+.txt, NSL_KDD_Train.csv)
     """
     try:
         if uploaded_combined_bytes is not None:
             buf = io.BytesIO(uploaded_combined_bytes)
-            df = pd.read_csv(buf, names=FEATURE_NAMES)
+            df = _read_nsl_kdd_dataframe(buf)
         elif uploaded_train_bytes is not None and uploaded_test_bytes is not None:
-            train_df = pd.read_csv(io.BytesIO(uploaded_train_bytes), names=FEATURE_NAMES)
-            test_df = pd.read_csv(io.BytesIO(uploaded_test_bytes), names=FEATURE_NAMES)
+            train_df = _read_nsl_kdd_dataframe(io.BytesIO(uploaded_train_bytes))
+            test_df = _read_nsl_kdd_dataframe(io.BytesIO(uploaded_test_bytes))
             df = pd.concat([train_df, test_df], ignore_index=True)
         else:
-            train_df = pd.read_csv('NSL-KDD/NSL_KDD_Train.csv', names=FEATURE_NAMES)
-            test_df = pd.read_csv('NSL-KDD/NSL_KDD_Test.csv', names=FEATURE_NAMES)
+            base = Path('.')
+            train_path, test_path = _discover_nsl_kdd_files(base)
+            if train_path is None or test_path is None:
+                return None
+            # Detect Git LFS pointers
+            if _is_git_lfs_pointer(train_path) or _is_git_lfs_pointer(test_path):
+                st.error("The dataset files appear to be Git LFS pointers. Streamlit Cloud may not pull LFS content. Replace them with actual CSVs or add a download step.")
+                return None
+            train_df = _read_nsl_kdd_dataframe(train_path)
+            test_df = _read_nsl_kdd_dataframe(test_path)
             df = pd.concat([train_df, test_df], ignore_index=True)
 
         df = df.dropna()
-        df['is_attack'] = df['attack_type'].apply(lambda x: 0 if x == 'normal' else 1)
+        df['is_attack'] = df['attack_type'].apply(lambda x: 0 if str(x).strip().lower() == 'normal' else 1)
         return df
-    except Exception as e:
-        # Defer detailed error to caller UI; just return None for control flow
+    except Exception:
         return None
 
 
@@ -653,30 +725,20 @@ def main():
 
     # If not found, provide upload UI and sample fallback
     if df is None:
-        st.warning("Dataset not found. Upload CSV files or use a small sample to proceed.")
+        st.error("Failed to locate NSL-KDD dataset in the repo. Ensure the CSV/TXT files are committed (not Git LFS pointers) under `NSL-KDD/` with names like `NSL_KDD_Train.csv` and `NSL_KDD_Test.csv` or the standard `KDDTrain+.txt` and `KDDTest+.txt`.")
+        st.caption("Optionally, you can upload the files below to proceed without changing the repo.")
         up_col1, up_col2 = st.columns(2)
         with up_col1:
-            uploaded_train = st.file_uploader("Upload Train CSV (e.g., NSL_KDD_Train.csv)", type=['csv'], key='train_csv')
-            uploaded_test = st.file_uploader("Upload Test CSV (e.g., NSL_KDD_Test.csv)", type=['csv'], key='test_csv')
+            uploaded_train = st.file_uploader("Upload Train CSV/TXT (e.g., KDDTrain+.txt)", type=['csv','txt'], key='train_csv')
         with up_col2:
-            uploaded_combined = st.file_uploader("Or upload a single combined CSV", type=['csv'], key='combined_csv')
-
-        df = None
+            uploaded_test = st.file_uploader("Upload Test CSV/TXT (e.g., KDDTest+.txt)", type=['csv','txt'], key='test_csv')
+        uploaded_combined = st.file_uploader("Or upload a single combined CSV", type=['csv'], key='combined_csv')
         if uploaded_combined is not None:
-            with st.spinner("Loading uploaded combined CSV..."):
-                df = load_data(uploaded_combined_bytes=uploaded_combined.getvalue())
+            df = load_data(uploaded_combined_bytes=uploaded_combined.getvalue())
         elif uploaded_train is not None and uploaded_test is not None:
-            with st.spinner("Loading uploaded train/test CSVs..."):
-                df = load_data(uploaded_train_bytes=uploaded_train.getvalue(),
-                               uploaded_test_bytes=uploaded_test.getvalue())
-
+            df = load_data(uploaded_train_bytes=uploaded_train.getvalue(), uploaded_test_bytes=uploaded_test.getvalue())
         if df is None:
-            if st.button("Use Sample Dataset (synthetic, 5k rows)"):
-                with st.spinner("Generating sample dataset..."):
-                    df = generate_synthetic_nsl_kdd(5000)
-                    df['is_attack'] = df['attack_type'].apply(lambda x: 0 if x == 'normal' else 1)
-            else:
-                st.stop()
+            st.stop()
 
     if page == "Data Overview":
         page_overview(df)
